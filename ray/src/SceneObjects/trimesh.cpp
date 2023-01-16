@@ -1,0 +1,197 @@
+#include "trimesh.h"
+// #include "../scene/bvh.h"
+#include <assert.h>
+#include <float.h>
+#include <string.h>
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+#include "../ui/TraceUI.h"
+extern TraceUI* traceUI;
+
+using namespace std;
+
+Trimesh::Trimesh(Scene *scene, Material *mat, TransformNode *transform)
+		: MaterialSceneObject(scene, mat),
+			displayListWithMaterials(0),
+			displayListWithoutMaterials(0)
+{
+	this->transform = transform;
+	vertNorms = false;
+}
+
+Trimesh::~Trimesh()
+{
+	for (auto m : materials)
+		delete m;
+	for (auto f : faces)
+		delete f;
+}
+
+// must add vertices, normals, and materials IN ORDER
+void Trimesh::addVertex(const glm::dvec3& v)
+{
+	vertices.emplace_back(v);
+}
+
+void Trimesh::addMaterial(Material* m)
+{
+	materials.emplace_back(m);
+}
+
+void Trimesh::addNormal(const glm::dvec3& n)
+{
+	normals.emplace_back(n);
+}
+
+// Returns false if the vertices a,b,c don't all exist
+bool Trimesh::addFace(int a, int b, int c)
+{
+	int vcnt = vertices.size();
+
+	if (a >= vcnt || b >= vcnt || c >= vcnt)
+		return false;
+
+	TrimeshFace* newFace = new TrimeshFace(
+	        scene, new Material(*this->material), this, a, b, c);
+	newFace->setTransform(this->transform);
+	if (!newFace->degen)
+		faces.push_back(newFace);
+	else
+		delete newFace;
+
+	// Don't add faces to the scene's object list so we can cull by bounding
+	// box
+	return true;
+}
+
+// Check to make sure that if we have per-vertex materials or normals
+// they are the right number.
+const char* Trimesh::doubleCheck()
+{
+	if (!materials.empty() && materials.size() != vertices.size())
+		return "Bad Trimesh: Wrong number of materials.";
+	if (!normals.empty() && normals.size() != vertices.size())
+		return "Bad Trimesh: Wrong number of normals.";
+
+	return 0;
+}
+
+void Trimesh::setBVH() {
+	myBVH = new BVH(faces);
+	// myBVH->display(0);
+}
+
+bool Trimesh::intersectLocal(ray& r, isect& i) const
+{
+	// return myBVH->checkIntersect(r, i);
+	double tMin, tMax;
+	if (myBVH->getBoundingBox().intersect(r, tMin, tMax)) {
+		return myBVH->intersect(r, i);
+	}
+	return false;
+}
+
+bool TrimeshFace::intersect(ray& r, isect& i) const
+{
+	return intersectLocal(r, i);
+}
+
+// Intersect ray r with the triangle abc.  If it hits returns true,
+// and put the parameter in t and the barycentric coordinates of the
+// intersection in u (alpha) and v (beta).
+bool TrimeshFace::intersectLocal(ray& r, isect& i) const
+{
+	// YOUR CODE HERE
+	//
+	// FIXME: Add ray-trimesh intersection
+
+	// points and edges counterclockwise
+  
+  const Trimesh::Vertices& v = parent->vertices;
+  
+  const glm::dvec3 a_coords = v[ids[0]];
+  const glm::dvec3 b_coords = v[ids[1]];
+  const glm::dvec3 c_coords = v[ids[2]];
+
+  const glm::dvec3 vab = b_coords - a_coords;
+  const glm::dvec3 vbc = c_coords - b_coords;
+  const glm::dvec3 vca = a_coords - c_coords;
+
+	// find intersection point with ray and plane 
+  const double tA = glm::dot(a_coords - r.getPosition(), normal);
+  const double tB = glm::dot(r.getDirection(), normal);
+  const double t =  tA / tB;
+	// time of intersect if possible 
+	if (t < RAY_EPSILON) return false;
+	// intersect point
+  const glm::dvec3 hitPoint = r.at(t);
+
+	// check if point is to the left of all vectors by 
+	// 		making sure cross is same direction as normal
+	if (glm::dot(glm::cross(vab, hitPoint - a_coords), normal) < 0) return false;
+	if (glm::dot(glm::cross(vbc, hitPoint - b_coords), normal) < 0) return false;
+	if (glm::dot(glm::cross(vca, hitPoint - c_coords), normal) < 0) return false;
+	// area of triangle 
+  const double area = glm::length(glm::cross(vab, -vca)) / 2;
+	// barycentric coordinates (a, b, c)
+  const double c = glm::length(glm::cross(vab, hitPoint - a_coords)) / 2 / area;
+  const double a = glm::length(glm::cross(vbc, hitPoint - b_coords)) / 2 / area;
+  const double b = glm::length(glm::cross(vca, hitPoint - c_coords)) / 2 / area;
+
+	// phong interpolation
+	glm::dvec3 newNorm;
+	// interpolate if vertex normals are given
+	if (parent->normals.size() == parent->vertices.size()) {
+		newNorm = glm::normalize(a * parent->normals[ids[0]] +
+								b * parent->normals[ids[1]] +
+								c * parent->normals[ids[2]]);
+	} else {
+		// use trimeshface normal
+		newNorm = normal;
+	}
+
+	// material interpolation
+	// interpolate if vertex materials are given
+	if (parent->materials.size() == parent->vertices.size()) {
+		Material newMaterial;
+		newMaterial += a * (*parent->materials[ids[0]]);
+		newMaterial += b * (*parent->materials[ids[1]]);
+		newMaterial += c * (*parent->materials[ids[2]]);
+		i.setMaterial(newMaterial);  // CHANGE THIS FOR INTERPOLATION
+	}
+
+	// copy intersection info to i
+	i.setObject(this);
+	i.setT(t);
+	i.setN(newNorm);
+	// i.uvCoordinates;  //  SET THIS LATER !!!!!!!!!!!!!!
+	i.setBary(glm::dvec3(a, b, c));
+	return true;
+}
+
+// Once all the verts and faces are loaded, per vertex normals can be
+// generated by averaging the normals of the neighboring faces.
+void Trimesh::generateNormals()
+{
+	int cnt = vertices.size();
+	normals.resize(cnt);
+	std::vector<int> numFaces(cnt, 0);
+
+	for (auto face : faces) {
+		glm::dvec3 faceNormal = face->getNormal();
+
+		for (int i = 0; i < 3; ++i) {
+			normals[(*face)[i]] += faceNormal;
+			++numFaces[(*face)[i]];
+		}
+	}
+
+	for (int i = 0; i < cnt; ++i) {
+		if (numFaces[i])
+			normals[i] /= numFaces[i];
+	}
+
+	vertNorms = true;
+}
+

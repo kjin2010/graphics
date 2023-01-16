@@ -1,0 +1,12 @@
+vscode/
+build*/
+.vscode/settings.json
+third-party/
+assets/
+raycheck.out
+
+ray-solution
+.python-version
+.DS_Store
+what_i_was_doing.txt
+raycheck.py
